@@ -163,6 +163,11 @@ pub fn register_usize(signal: c_int, flag: Arc<AtomicUsize>, value: usize) -> Re
     unsafe { crate::register(signal, move || flag.store(value, Ordering::SeqCst)) }
 }
 
+/// Registers an action to increment the counter by one whenever the signal arrives.
+pub fn register_counter(signal: c_int, counter: Arc<AtomicUsize>) -> Result<SigId, Error> {
+    unsafe { crate::register(signal, move || { counter.fetch_add(1, Ordering::SeqCst); }) }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic;
@@ -210,5 +215,38 @@ mod tests {
         assert!(!wait_flag(&flag));
         // And the unregistration actually dropped its copy of the Arc
         assert_eq!(1, Arc::strong_count(&flag));
+    }
+
+    fn wait_counter(counter: &AtomicUsize, value: usize) -> bool {
+        let start = Instant::now();
+        while counter.load(Ordering::Relaxed) != value {
+            atomic::spin_loop_hint();
+            if Instant::now() - start > Duration::from_secs(1) {
+                // We reached a timeout and nothing happened yet.
+                // In theory, using timeouts for thread-synchronization tests is wrong, but a
+                // second should be enough in practice.
+                return false;
+            }
+        }
+        eprintln!("counter value: {}", counter.load(Ordering::Relaxed));
+        true
+    }
+
+    #[test]
+    fn counter() {
+        // When we register the action, it is active.
+        let counter = Arc::new(AtomicUsize::new(0));
+        #[cfg(not(windows))]
+        let signal = register_counter(crate::SIGUSR1, counter.clone()).unwrap();
+        #[cfg(windows)]
+        let signal = register(crate::SIGTERM, counter.clone()).unwrap();
+        self_signal();
+        assert!(wait_counter(&counter, 1));
+        // But stops working after it is unregistered.
+        assert!(crate::unregister(signal));
+        self_signal();
+        assert!(!wait_counter(&counter, 2));
+        // And the unregistration actually dropped its copy of the Arc
+        assert_eq!(1, Arc::strong_count(&counter));
     }
 }
